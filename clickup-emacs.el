@@ -198,6 +198,14 @@ Values are the Org-mode keywords."
 
 ;;; Org Mode Formatting & Writing
 
+(defun clickup-emacs--map-org-state-to-clickup (org-state)
+  "Find the ClickUp status string for a given ORG-STATE."
+  ;; We search the alist where the CDR (value) matches org-state
+  (let ((match (rassoc org-state clickup-emacs-status-mapping)))
+    (if match
+        (car match) ;; Return the key (e.g., "in progress")
+      nil)))
+
 (defun clickup-emacs--format-date-from-ms (ms-string)
   "Convert ClickUp millisecond timestamp string to Org date string.
 Returns nil if MS-STRING is nil."
@@ -282,6 +290,29 @@ Returns nil if MS-STRING is nil."
     (error
      (message "Error writing to %s: %s" file-path (error-message-string err)))))
 
+(defun clickup-emacs-update-status-on-change ()
+  "Hook to sync Org status changes to ClickUp."
+  (let* ((task-id (org-entry-get (point) "ID-CLICKUP"))
+         (new-state org-state)) ;; org-state is a variable provided by the hook
+    
+    (when (and task-id new-state)
+      (let ((clickup-status (clickup-emacs--map-org-state-to-clickup new-state)))
+        
+        (if clickup-status
+            (progn
+              (message "Syncing status '%s' to ClickUp..." clickup-status)
+              (clickup-emacs--request-async
+               'PUT
+               (format "/task/%s" task-id)
+               nil
+               `(("status" . ,clickup-status)) ;; Payload
+               (lambda (response)
+                 (message "Successfully updated ClickUp task %s to %s" task-id clickup-status))
+               (lambda (err _r _d)
+                 (message "Failed to sync status: %s" err))))
+          
+          (message "No ClickUp mapping found for Org state '%s'. Skipping sync." new-state))))))
+
 ;;; User-facing Commands
 
 ;;;###autoload
@@ -303,6 +334,20 @@ Returns nil if MS-STRING is nil."
              (lambda (tasks)
                (clickup-emacs--write-tasks-to-file tasks file-path list-id)))
           (message "Invalid mapping found: %S" mapping))))))
+
+;;;###autoload
+(defun clickup-emacs-enable-status-sync ()
+  "Enable automatic status syncing from Org to ClickUp."
+  (interactive)
+  (add-hook 'org-after-todo-state-change-hook #'clickup-emacs-update-status-on-change)
+  (message "ClickUp status sync enabled."))
+
+;;;###autoload
+(defun clickup-emacs-disable-status-sync ()
+  "Disable automatic status syncing."
+  (interactive)
+  (remove-hook 'org-after-todo-state-change-hook #'clickup-emacs-update-status-on-change)
+  (message "ClickUp status sync disabled."))
 
 (provide 'clickup-emacs)
 ;;; clickup-emacs.el ends here

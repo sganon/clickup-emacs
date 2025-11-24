@@ -2,15 +2,15 @@
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-This package provides integration between Emacs and ClickUp, allowing you to view your tasks directly in Org-mode without leaving your editor.
-
-It performs a **one-way sync** from ClickUp lists to specific Org files. 
+This package provides integration between Emacs and ClickUp, allowing you to view, and make basic edits to your tasks directly in Org-mode without leaving your editor.
 
 ## Features
 
 - **One-Way Sync:** Pull tasks from ClickUp Lists into local Org files.
+- **Two-Way Status Sync:** Changing a TODO state in Emacs automatically updates the status in ClickUp.
 - **Multiple List Support:** Map different ClickUp lists to different Org files (e.g., `work.org` vs `personal.org`).
 - **Status Mapping:** Map ClickUp statuses (e.g., "TECH REVIEW", "BLOCKED") to specific Org-mode keywords.
+- **Deadline Mapping:** ClickUp due dates are automatically mapped to Org `DEADLINE` timestamps for Agenda visibility.
 - **Assignee Filtering:** Optionally fetch only tasks assigned to you.
 - **Status Filtering:** Fetch only relevant tasks (e.g., ignore "Done" or "Closed" tasks to save bandwidth).
 - **Rich Org Metadata:** Tasks include links back to ClickUp, descriptions, and priorities.
@@ -90,6 +90,10 @@ To find your List ID:
           ("blocked" . "BLOCKED")
           ("tech review" . "TECH-REVIEW")
           ("review" . "REVIEW")))
+      
+  ;; 6. Enable Two-Way Status Sync
+  ;; This hook triggers whenever you change a TODO state in Org
+  (add-hook 'org-after-todo-state-change-hook #'clickup-emacs-update-status-on-change)
 )
 ```
 
@@ -134,6 +138,17 @@ This will:
 2. Filter them by assignee and status.
 3. Convert them to Org format.
 4. Write them to the specified files.
+
+## Two-Way Status Sync
+
+This package includes a hook to push status changes back to ClickUp.
+
+1. Enable the hook in your config (see above).
+2. Open your synced Org file.
+3. Change a task state (e.g., from `TODO` to `IN-PROGRESS` using `SPC m t` or `S-RIGHT`).
+4. Emacs will automatically send a `PUT` request to ClickUp updating the status.
+
+**Note:** The sync only happens if the new Org state maps to a valid ClickUp status in your `clickup-emacs-status-mapping`.
 
 ### Viewing in Agenda
 
