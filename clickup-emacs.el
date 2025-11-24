@@ -349,5 +349,58 @@ Returns nil if MS-STRING is nil."
   (remove-hook 'org-after-todo-state-change-hook #'clickup-emacs-update-status-on-change)
   (message "ClickUp status sync disabled."))
 
+;;;###autoload
+(defun clickup-emacs-capture ()
+  "Create a new task in ClickUp by selecting a destination from your mappings."
+  (interactive)
+  
+  (if (null clickup-emacs-list-mappings)
+      (error "No mappings defined. Configure `clickup-emacs-list-mappings` first")
+    
+    (let* ((choices (mapcar (lambda (m)
+                              (cons (format "%s (%s)" 
+                                            (file-name-nondirectory (plist-get m :file))
+                                            (plist-get m :id))
+                                    (plist-get m :id)))
+                            clickup-emacs-list-mappings))
+           (selection (completing-read "Capture to List: " choices nil t))
+           (list-id (cdr (assoc selection choices))))
+      
+      (when list-id
+        (let* ((title (read-string "Task Title: "))
+               (desc (read-string "Description (optional): "))
+               
+               (status-keys (mapcar #'car clickup-emacs-status-mapping))
+               (status (completing-read "Status: " status-keys nil t)))
+          
+          (message "Creating task '%s'..." title)
+
+          (let ((create-fn 
+                 (lambda (&optional assignee-id)
+                   (let ((payload `(("name" . ,title)
+                                    ("description" . ,desc)
+                                    ("status" . ,status))))
+                     
+                     ;; Add assignee if we found one
+                     (when assignee-id
+                       (push `("assignees" . [,assignee-id]) payload))
+
+                     (clickup-emacs--request-async
+                      'POST
+                      (format "/list/%s/task" list-id)
+                      nil
+                      payload
+                      (lambda (response)
+                        (let ((url (cdr (assoc 'url response))))
+                          (message "Task created! Link: %s" url)
+                          ;; Optional: Copy link to clipboard
+                          (kill-new url)))
+                      (lambda (err _r _d)
+                        (message "Failed to create task: %s" err)))))))
+
+            (if clickup-emacs-filter-assigned-to-me
+                (clickup-emacs-get-current-user-async create-fn)
+              (funcall create-fn nil))))))))
+
 (provide 'clickup-emacs)
 ;;; clickup-emacs.el ends here

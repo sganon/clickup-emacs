@@ -8,6 +8,7 @@ This package provides integration between Emacs and ClickUp, allowing you to vie
 
 - **One-Way Sync:** Pull tasks from ClickUp Lists into local Org files.
 - **Two-Way Status Sync:** Changing a TODO state in Emacs automatically updates the status in ClickUp.
+- **Quick Capture:** Create new tasks in specific ClickUp lists with status selection and auto-assignment directly from Emacs.
 - **Multiple List Support:** Map different ClickUp lists to different Org files (e.g., `work.org` vs `personal.org`).
 - **Status Mapping:** Map ClickUp statuses (e.g., "TECH REVIEW", "BLOCKED") to specific Org-mode keywords.
 - **Deadline Mapping:** ClickUp due dates are automatically mapped to Org `DEADLINE` timestamps for Agenda visibility.
@@ -95,6 +96,12 @@ To find your List ID:
   ;; This hook triggers whenever you change a TODO state in Org
   (add-hook 'org-after-todo-state-change-hook #'clickup-emacs-update-status-on-change)
 )
+
+;; Recommended Keybindings
+(map! :leader
+    (:prefix ("c" . "clickup")
+        :desc "Sync all lists"  "s" #'clickup-emacs-sync-all
+        :desc "Capture task"    "c" #'clickup-emacs-capture))
 ```
 
 ### Org Agenda Integration
@@ -138,6 +145,19 @@ This will:
 2. Filter them by assignee and status.
 3. Convert them to Org format.
 4. Write them to the specified files.
+
+### Capturing Tasks
+
+reate tasks without leaving Emacs using the interactive capture command:
+
+`M-x clickup-emacs-capture`
+
+1. **Select Destination:** Choose which Org file (and underlying ClickUp List) the task belongs to.
+2. **Enter Details:** Input the task title and an optional description.
+3. **Select Status:** Choose a status from your configured `clickup-emacs-status-mapping`.
+4. **Result:** The task is created in ClickUp immediately.
+   - If `clickup-emacs-filter-assigned-to-me` is enabled, the task is automatically assigned to you.
+   - The link to the new task is copied to your clipboard.
 
 ## Two-Way Status Sync
 
