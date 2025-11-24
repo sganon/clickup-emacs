@@ -1,0 +1,288 @@
+;;; clickup-emacs.el --- ClickUp.com integration -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2025
+;; Author: Simon GANON
+;; Version: 0.1.0
+;; Package-Requires: ((emacs "27.1") (request "0.3.0") (dash "2.17.0") (s "1.12.0"))
+;; Keywords: tools, org, clickup
+;; URL: https://github.com/sganon/clickup-emacs
+
+;;; Commentary:
+;; clickup-emacs.el provides an interface to ClickUp.com task tracking from Emacs.
+;; It performs a one-way sync from defined ClickUp lists to specific Org files,
+;; allowing you to view your tasks and assignments directly in Org mode.
+
+;;; Code:
+
+;; Dependencies
+(require 'request)
+(require 'json)
+(require 'dash)
+(require 's)
+(require 'org)
+(require 'cl-lib)
+
+;;; Customization and Variables
+
+(defgroup clickup-emacs nil
+  "Integration with ClickUp task tracking."
+  :group 'tools
+  :prefix "clickup-emacs-")
+
+(defcustom clickup-emacs-api-key nil
+  "API key for ClickUp.com.
+Can be set manually or loaded from CLICKUP_API_KEY environment variable."
+  :type 'string
+  :group 'clickup-emacs)
+
+(defcustom clickup-emacs-api-url "https://api.clickup.com/api/v2"
+  "REST API endpoint URL for ClickUp."
+  :type 'string
+  :group 'clickup-emacs)
+
+(defcustom clickup-emacs-list-mappings '()
+  "A list of plists mapping ClickUp List IDs to specific Org files.
+Example:
+  '((:id \"12345678\" :file \"~/org/work.org\")
+    (:id \"87654321\" :file \"~/org/personal.org\"))"
+  :type '(repeat (plist :key-type symbol :value-type string))
+  :group 'clickup-emacs)
+
+(defcustom clickup-emacs-filter-statuses
+  '("BACKLOG" "TO DO" "IN PROGRESS" "BLOCKED" "TECH REVIEW" "REVIEW")
+  "List of specific ClickUp statuses to fetch.
+If nil, fetches all non-archived tasks.
+Note: ClickUp expects exact status names."
+  :type '(repeat string)
+  :group 'clickup-emacs)
+
+(defcustom clickup-emacs-filter-assigned-to-me t
+  "If non-nil, only fetch tasks assigned to the authenticated user."
+  :type 'boolean
+  :group 'clickup-emacs)
+
+(defcustom clickup-emacs-debug nil
+  "Enable debug logging for ClickUp requests."
+  :type 'boolean
+  :group 'clickup-emacs)
+
+(defcustom clickup-emacs-status-mapping
+  '(("backlog" . "BACKLOG")
+    ("to do" . "TODO")
+    ("in progress" . "IN-PROGRESS")
+    ("blocked" . "BLOCKED")
+    ("tech review" . "TECH-REVIEW")
+    ("review" . "REVIEW"))
+  "Mapping between ClickUp status names and 'org-mode' TODO states.
+Keys are the ClickUp status strings (case-insensitive).
+Values are the Org-mode keywords."
+  :type '(alist :key-type string :value-type string)
+  :group 'clickup-emacs)
+
+;; Internal Cache
+(defvar clickup-emacs--current-user-id nil
+  "Cache for the authenticated user's ID.")
+
+(defvar clickup-emacs--cache-tasks nil
+  "Cache for the most recently fetched tasks.")
+
+;;; Core API Functions
+
+(defun clickup-emacs--headers ()
+  "Return headers for ClickUp API requests."
+  (unless clickup-emacs-api-key
+    (error "ClickUp API key not set."))
+  `(("Content-Type" . "application/json")
+    ("Authorization" . ,clickup-emacs-api-key)))
+
+(defun clickup-emacs--log (format-string &rest args)
+  "Log message with FORMAT-STRING and ARGS if debug is enabled."
+  (when clickup-emacs-debug
+    (apply #'message (concat "[ClickUp] " format-string) args)))
+
+(defun clickup-emacs--request-async (method endpoint &optional params data-payload success-fn error-fn)
+  "Make an async REST request to ClickUp API."
+  (clickup-emacs--log "Making async ClickUp request: %s %s" method endpoint)
+  
+  (unless success-fn
+    (setq success-fn (lambda (data) (clickup-emacs--log "Request success: %s" (prin1-to-string data)))))
+  (unless error-fn
+    (setq error-fn (lambda (err _response _data) (message "ClickUp API error: %s" err))))
+
+  (let ((url (s-concat clickup-emacs-api-url endpoint))
+        (request-data (when data-payload (json-encode data-payload)))) 
+    (request
+      url
+      :type (symbol-name method)
+      :headers (clickup-emacs--headers)
+      :params params
+      :data request-data
+      :parser 'json-read
+      :success (cl-function
+                (lambda (&key data &allow-other-keys)
+                  (funcall success-fn data)))
+      :error (cl-function
+              (lambda (&key error-thrown response data &allow-other-keys)
+                (funcall error-fn error-thrown response data))))))
+
+(defun clickup-emacs-get-current-user-async (callback)
+  "Fetch the authenticated user's ID, using cache if available."
+  (if clickup-emacs--current-user-id
+      (funcall callback clickup-emacs--current-user-id)
+    (clickup-emacs--log "Fetching current user info...")
+    (clickup-emacs--request-async 
+     'GET "/user" nil nil
+     (lambda (response)
+       (let ((user (cdr (assoc 'user response))))
+         (if user
+             (let ((id (cdr (assoc 'id user))))
+               (setq clickup-emacs--current-user-id id)
+               (clickup-emacs--log "Identified current user as ID: %s" id)
+               (funcall callback id))
+           (message "Could not identify current user.")
+           (funcall callback nil))))
+     (lambda (err _r _d)
+       (message "Error fetching user: %s" err)
+       (funcall callback nil)))))
+
+;;; Task Fetching
+
+(defun clickup-emacs-get-tasks-async (list-id callback)
+  "Asynchronously get tasks for LIST-ID, optionally filtering by assignee and status."
+  (clickup-emacs--log "Fetching tasks for list %s" list-id)
+  
+  (let ((start-fetching-fn
+         (lambda (&optional user-id)
+           (let ((all-tasks nil)
+                 (page 0))
+             
+             (cl-labels ((fetch-next-page ()
+                           (let ((params `(("archived" . "false")
+                                           ("page" . ,(number-to-string page)))))
+                             
+                             (when clickup-emacs-filter-statuses
+                               (dolist (status clickup-emacs-filter-statuses)
+                                 (push (cons "statuses[]" status) params)))
+                             
+                             (when user-id
+                               (push (cons "assignees[]" user-id) params))
+
+                             (clickup-emacs--request-async
+                              'GET 
+                              (format "/list/%s/task" list-id)
+                              params nil
+                              (lambda (response)
+                                (let ((new-tasks (cdr (assoc 'tasks response))))
+                                  (when (vectorp new-tasks)
+                                    (setq new-tasks (append new-tasks nil)))
+
+                                  (if (or (null new-tasks) (eq (length new-tasks) 0))
+                                      (progn
+                                        (message "Fetched %d tasks." (length all-tasks))
+                                        (setq clickup-emacs--cache-tasks all-tasks)
+                                        (funcall callback all-tasks))
+                                    ;; Recurse for next page
+                                    (setq all-tasks (append all-tasks new-tasks))
+                                    (setq page (1+ page))
+                                    (message "Fetching page %d (total: %d)..." page (length all-tasks))
+                                    (fetch-next-page))))
+                              (lambda (err _r _d)
+                                (message "Error fetching tasks: %s" err)
+                                (funcall callback all-tasks))))))
+               
+               (fetch-next-page))))))
+
+    (if clickup-emacs-filter-assigned-to-me
+        (clickup-emacs-get-current-user-async start-fetching-fn)
+      (funcall start-fetching-fn nil))))
+
+;;; Org Mode Formatting & Writing
+
+(defun clickup-emacs--map-clickup-status-to-org (status)
+  "Map ClickUp status name to 'org-mode' TODO state string (case-insensitive)."
+  (let* ((status-lower (downcase status))
+         (match (seq-find (lambda (mapping)
+                            (string-equal (downcase (car mapping)) status-lower))
+                          clickup-emacs-status-mapping)))
+    (if match
+        (cdr match)
+      (progn
+        (message "[ClickUp Warning] No mapping found for status '%s'. Defaulting to TODO." status)
+        "TODO"))))
+
+(defun clickup-emacs--format-task-as-org-entry (task)
+  "Format a ClickUp TASK as an 'org-mode' entry."
+  (let* ((id (cdr (assoc 'id task)))
+         (name (cdr (assoc 'name task)))
+         (description (or (cdr (assoc 'description task)) ""))
+         (status-obj (cdr (assoc 'status task)))
+         (status-name (cdr (assoc 'status status-obj)))
+         (todo-state (clickup-emacs--map-clickup-status-to-org status-name))
+         (priority-obj (cdr (assoc 'priority task)))
+         (priority-num (and priority-obj (cdr (assoc 'priority priority-obj))))
+         (priority (cond ((null priority-num) "[#C]") 
+                         ((string= priority-num "1") "[#A]")
+                         ((string= priority-num "2") "[#B]")
+                         (t "[#C]")))
+         (link (cdr (assoc 'url task)))
+         (result ""))
+
+    (setq result (concat result (format "*** %s %s %s\n" todo-state priority name)))
+    (setq result (concat result ":PROPERTIES:\n"))
+    (setq result (concat result (format ":ID-CLICKUP: %s\n" id)))
+    (setq result (concat result (format ":LINK: %s\n" link)))
+    (setq result (concat result ":END:\n"))
+    
+    (when (and (stringp description) (not (string-empty-p description)))
+      (setq result (concat result ":DESCRIPTION: |\n"))
+      (dolist (line (split-string description "\n"))
+        (setq result (concat result (format "  %s\n" line)))))
+    
+    (setq result (concat result "\n"))
+    result))
+
+(defun clickup-emacs--write-tasks-to-file (tasks file-path list-id)
+  "Write TASKS to FILE-PATH, overwriting existing content."
+  (condition-case err
+      (progn
+        (make-directory (file-name-directory file-path) t)
+        (with-temp-buffer
+          (insert ":PROPERTIES:\n")
+          (insert (format ":CLICKUP-LIST-ID: %s\n" list-id))
+          (insert (format ":LAST-SYNC: %s\n" (format-time-string "%Y-%m-%d %H:%M:%S")))
+          (insert ":END:\n")
+          (insert (format "#+TITLE: ClickUp Tasks (%s)\n" list-id))
+          (insert "#+TODO: BACKLOG TODO IN-PROGRESS TECH-REVIEW REVIEW BLOCKED | DONE\n\n")
+
+          (dolist (task tasks)
+            (insert (clickup-emacs--format-task-as-org-entry task)))
+
+          (write-region (point-min) (point-max) file-path nil 'quiet)
+          (message "Successfully synced %d tasks to %s" (length tasks) file-path)))
+    (error
+     (message "Error writing to %s: %s" file-path (error-message-string err)))))
+
+;;; User-facing Commands
+
+;;;###autoload
+(defun clickup-emacs-sync-all ()
+  "Sync all lists defined in `clickup-emacs-list-mappings`."
+  (interactive)
+  (if (null clickup-emacs-list-mappings)
+      (error "No mappings defined. Please configure `clickup-emacs-list-mappings`")
+    
+    (message "Starting sync for %d lists..." (length clickup-emacs-list-mappings))
+    
+    (dolist (mapping clickup-emacs-list-mappings)
+      (let ((list-id (plist-get mapping :id))
+            (file-path (expand-file-name (plist-get mapping :file))))
+        
+        (if (and list-id file-path)
+            (clickup-emacs-get-tasks-async
+             list-id
+             (lambda (tasks)
+               (clickup-emacs--write-tasks-to-file tasks file-path list-id)))
+          (message "Invalid mapping found: %S" mapping))))))
+
+(provide 'clickup-emacs)
+;;; clickup-emacs.el ends here
