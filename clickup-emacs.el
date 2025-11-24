@@ -198,6 +198,15 @@ Values are the Org-mode keywords."
 
 ;;; Org Mode Formatting & Writing
 
+(defun clickup-emacs--format-date-from-ms (ms-string)
+  "Convert ClickUp millisecond timestamp string to Org date string.
+Returns nil if MS-STRING is nil."
+  (when (and ms-string (not (string-empty-p ms-string)))
+    ;; ClickUp uses milliseconds, Emacs uses seconds.
+    (let* ((seconds (/ (string-to-number ms-string) 1000))
+           (time (seconds-to-time seconds)))
+      (format-time-string "%Y-%m-%d %a" time))))
+
 (defun clickup-emacs--map-clickup-status-to-org (status)
   "Map ClickUp status name to 'org-mode' TODO state string (case-insensitive)."
   (let* ((status-lower (downcase status))
@@ -225,6 +234,10 @@ Values are the Org-mode keywords."
                          ((string= priority-num "2") "[#B]")
                          (t "[#C]")))
          (link (cdr (assoc 'url task)))
+         (due-date-raw (cdr (assoc 'due_date task)))
+         (start-date-raw (cdr (assoc 'start_date task)))
+         (due-date (clickup-emacs--format-date-from-ms due-date-raw))
+         (start-date (clickup-emacs--format-date-from-ms start-date-raw))
          (result ""))
 
     (setq result (concat result (format "*** %s %s %s\n" todo-state priority name)))
@@ -232,6 +245,13 @@ Values are the Org-mode keywords."
     (setq result (concat result (format ":ID-CLICKUP: %s\n" id)))
     (setq result (concat result (format ":LINK: %s\n" link)))
     (setq result (concat result ":END:\n"))
+
+    (when (or due-date start-date)
+      (when due-date
+        (setq result (concat result (format "DEADLINE: <%s> " due-date))))
+      (when start-date
+        (setq result (concat result (format "SCHEDULED: <%s> " start-date))))
+      (setq result (concat result "\n")))
     
     (when (and (stringp description) (not (string-empty-p description)))
       (setq result (concat result ":DESCRIPTION: |\n"))
