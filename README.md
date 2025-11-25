@@ -4,6 +4,8 @@
 
 This package provides integration between Emacs and ClickUp, allowing you to view, and make basic edits to your tasks directly in Org-mode without leaving your editor.
 
+Inspired by [anegg0/linear-emacs](https://github.com/anegg0/linear-emacs)
+
 ## Features
 
 - **One-Way Sync:** Pull tasks from ClickUp Lists into local Org files.
