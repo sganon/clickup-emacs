@@ -66,6 +66,12 @@ Note: ClickUp expects exact status names."
   :type 'boolean
   :group 'clickup-emacs)
 
+(defcustom clickup-emacs-sync-custom-fields '("Custom ID")
+  "List of ClickUp Custom Field names to sync to Org properties.
+Example: '(\"Custom ID\" \"Sprint Points\" \"Client Name\")"
+  :type '(repeat string)
+  :group 'clickup-emacs)
+
 (defcustom clickup-emacs-status-mapping
   '(("backlog" . "BACKLOG")
     ("to do" . "TODO")
@@ -246,12 +252,63 @@ Returns nil if MS-STRING is nil."
          (start-date-raw (cdr (assoc 'start_date task)))
          (due-date (clickup-emacs--format-date-from-ms due-date-raw))
          (start-date (clickup-emacs--format-date-from-ms start-date-raw))
+         (custom-id (cdr (assoc 'custom_id task)))
+         (custom-fields (cdr (assoc 'custom_fields task)))
          (result ""))
 
     (setq result (concat result (format "*** %s %s %s\n" todo-state priority name)))
     (setq result (concat result ":PROPERTIES:\n"))
     (setq result (concat result (format ":ID-CLICKUP: %s\n" id)))
+    (when (and custom-id (not (string-empty-p custom-id)))
+      (setq result (concat result (format ":CLICKUP-CUSTOM-ID: %s\n" custom-id))))
     (setq result (concat result (format ":LINK: %s\n" link)))
+
+
+    (when (and clickup-emacs-sync-custom-fields custom-fields)
+      (dolist (field (append custom-fields nil))
+        (let ((field-name (cdr (assoc 'name field)))
+              (field-type (cdr (assoc 'type field)))
+              (field-value (cdr (assoc 'value field))))
+          
+          (when (and field-name 
+                     field-value 
+                     (member field-name clickup-emacs-sync-custom-fields))
+            
+            (let ((display-value 
+                   (cond
+                    ;; Dropdowns AND Labels
+                    ((member field-type '("drop_down" "labels"))
+                     (let* ((type-config (cdr (assoc 'type_config field)))
+                            (options (cdr (assoc 'options type-config)))
+                            (selected-ids (if (vectorp field-value) 
+                                              (append field-value nil) 
+                                            (list field-value))))
+                       
+                       (mapconcat 
+                        (lambda (uuid)
+                          (let ((match (seq-find (lambda (opt) 
+                                                   (equal (cdr (assoc 'id opt)) uuid)) 
+                                                 options)))
+                            (if match 
+                                ;; FIX: Check for 'label' OR 'name'
+                                (or (cdr (assoc 'label match)) 
+                                    (cdr (assoc 'name match)))
+                              (format "%s" uuid))))
+                        selected-ids 
+                        ", ")))
+                    
+                    ;; URL fields
+                    ((string= field-type "url")
+                     (if (listp field-value) 
+                         (cdr (assoc 'value field-value))
+                       field-value))
+
+                    ;;Default
+                    (t (format "%s" field-value)))))
+
+              (let ((clean-prop-name (concat "CLICKUP-" (upcase (replace-regexp-in-string " " "-" field-name)))))
+                (setq result (concat result (format ":%s: %s\n" clean-prop-name display-value)))))))))
+    
     (setq result (concat result ":END:\n"))
 
     (when (or due-date start-date)
