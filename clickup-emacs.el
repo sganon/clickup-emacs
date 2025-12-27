@@ -78,7 +78,8 @@ Example: '(\"Custom ID\" \"Sprint Points\" \"Client Name\")"
     ("in progress" . "IN-PROGRESS")
     ("blocked" . "BLOCKED")
     ("tech review" . "TECH-REVIEW")
-    ("review" . "REVIEW"))
+    ("review" . "REVIEW")
+    ("done" . "DONE"))
   "Mapping between ClickUp status names and 'org-mode' TODO states.
 Keys are the ClickUp status strings (case-insensitive).
 Values are the Org-mode keywords."
@@ -232,6 +233,19 @@ Returns nil if MS-STRING is nil."
       (progn
         (message "[ClickUp Warning] No mapping found for status '%s'. Defaulting to TODO." status)
         "TODO"))))
+
+(defun clickup-emacs--read-date-to-ms (prompt)
+  "Read a date string (allowing empty input), parse with Org, and convert to ms."
+  ;; Use read-string first. This allows the user to hit RET to return ""
+  (let ((input (read-string prompt)))
+    (if (string-empty-p input)
+        nil ;; Return nil if user skipped
+      
+      ;; If user typed something (e.g. "+2d"), use org-read-date to parse it
+      ;; We pass 't' as the 2nd arg to get a Time Object
+      ;; We pass 'input' as the 6th arg (DEFAULT-INPUT) so it parses what we typed
+      (let ((time (org-read-date nil t nil nil nil input)))
+        (floor (* (float-time time) 1000))))))
 
 (defun clickup-emacs--format-task-as-org-entry (task)
   "Format a ClickUp TASK as an 'org-mode' entry."
@@ -408,7 +422,7 @@ Returns nil if MS-STRING is nil."
 
 ;;;###autoload
 (defun clickup-emacs-capture ()
-  "Create a new task in ClickUp by selecting a destination from your mappings."
+  "Create a new task in ClickUp with optional dates and auto-assignment."
   (interactive)
   
   (if (null clickup-emacs-list-mappings)
@@ -428,7 +442,11 @@ Returns nil if MS-STRING is nil."
                (desc (read-string "Description (optional): "))
                
                (status-keys (mapcar #'car clickup-emacs-status-mapping))
-               (status (completing-read "Status: " status-keys nil t)))
+               (status (completing-read "Status: " status-keys nil t))
+
+               ;; Passing 't' to org-read-date allows empty input (skip)
+               (start-date-ms (clickup-emacs--read-date-to-ms "Start Date (optional, RET to skip): "))
+               (due-date-ms (clickup-emacs--read-date-to-ms "Due Date (optional, RET to skip): ")))
           
           (message "Creating task '%s'..." title)
 
@@ -438,9 +456,15 @@ Returns nil if MS-STRING is nil."
                                     ("description" . ,desc)
                                     ("status" . ,status))))
                      
-                     ;; Add assignee if we found one
+                     ;; Inject Assignee
                      (when assignee-id
                        (push `("assignees" . [,assignee-id]) payload))
+
+                     ;; Inject Dates
+                     (when start-date-ms
+                       (push `("start_date" . ,start-date-ms) payload))
+                     (when due-date-ms
+                       (push `("due_date" . ,due-date-ms) payload))
 
                      (clickup-emacs--request-async
                       'POST
@@ -450,7 +474,6 @@ Returns nil if MS-STRING is nil."
                       (lambda (response)
                         (let ((url (cdr (assoc 'url response))))
                           (message "Task created! Link: %s" url)
-                          ;; Optional: Copy link to clipboard
                           (kill-new url)))
                       (lambda (err _r _d)
                         (message "Failed to create task: %s" err)))))))
