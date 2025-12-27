@@ -247,6 +247,28 @@ Returns nil if MS-STRING is nil."
       (let ((time (org-read-date nil t nil nil nil input)))
         (floor (* (float-time time) 1000))))))
 
+(defun clickup-emacs--capture-context ()
+  "Return default description text referencing current buffer or region."
+  (let* ((buffer (or (buffer-base-buffer (current-buffer)) (current-buffer)))
+         (file (and buffer (buffer-file-name buffer)))
+         (region-active (use-region-p))
+         (start (if region-active (region-beginning) (point)))
+         (line (when file (line-number-at-pos start)))
+         (link (when (and file line)
+                 (org-link-make-string
+                  (format "file:%s::%d" file line)
+                  (format "%s:%d" (file-name-nondirectory file) line))))
+         (selection (when region-active
+                      (string-trim
+                       (buffer-substring-no-properties (region-beginning) (region-end)))))
+         (parts nil))
+    (when link
+      (push link parts))
+    (when (and selection (not (string-empty-p selection)))
+      (push (format "#+begin_quote\n%s\n#+end_quote" selection) parts))
+    (when parts
+      (string-join (nreverse parts) "\n\n"))))
+
 (defun clickup-emacs--format-task-as-org-entry (task)
   "Format a ClickUp TASK as an 'org-mode' entry."
   (let* ((id (cdr (assoc 'id task)))
@@ -439,7 +461,9 @@ Returns nil if MS-STRING is nil."
       
       (when list-id
         (let* ((title (read-string "Task Title: "))
-               (desc (read-string "Description (optional): "))
+               (default-desc (clickup-emacs--capture-context))
+               (desc (read-string "Description (optional): "
+                                  default-desc nil nil default-desc))
                
                (status-keys (mapcar #'car clickup-emacs-status-mapping))
                (status (completing-read "Status: " status-keys nil t))
